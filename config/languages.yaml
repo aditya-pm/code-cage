@@ -1,0 +1,107 @@
+# CodeCage language registry.
+#
+# Adding a language = add a runtimes/<lang>/Containerfile + one entry here.
+# No API or UI code changes are needed: the UI builds its language picker,
+# templates and policy chips from GET /api/languages.
+
+defaults:
+  cpus: 1.0              # SR-5  CPU quota (cores)
+  output_cap_kb: 64      # SR-11 bytes kept per stream
+  output_kill_kb: 1024   # SR-11 total output before the program is killed
+  scratch_mb: 32         # SR-8  size of the writable /sandbox tmpfs
+  tmp_mb: 16             # SR-8  size of the writable, noexec /tmp tmpfs
+  max_file_mb: 16        # SR-8  RLIMIT_FSIZE inside the sandbox
+  open_files: 64         # SR-10 RLIMIT_NOFILE
+
+languages:
+  python:
+    name: Python
+    version: "3.12"
+    image: localhost:5050/codecage/runtime-python:1.0
+    file: main.py
+    monaco: python
+    # "Compile" = a syntax check, so syntax errors are reported as Compilation Error.
+    compile: ["python3", "-I", "-m", "py_compile", "main.py"]
+    run: ["python3", "-I", "-B", "-u", "main.py"]
+    compile_timeout_s: 5
+    time_limit_s: 5
+    memory_mb: 256
+    pids: 64
+    template: |
+      # CodeCage · Python 3.12
+      # Reads one line of input and greets every name in it.
+
+      import sys
+
+      def main() -> None:
+          names = sys.stdin.read().split() or ["world"]
+          for name in names:
+              print(f"Hello, {name}! 👋")
+          print(f"Greeted {len(names)} name(s) from inside a rootless container.")
+
+      if __name__ == "__main__":
+          main()
+    sample_stdin: "Ada Linus Grace"
+
+  cpp:
+    name: C++
+    version: "17 (GCC)"
+    image: localhost:5050/codecage/runtime-cpp:1.0
+    file: main.cpp
+    monaco: cpp
+    compile: ["g++", "-O2", "-std=c++17", "-pipe", "-o", "main", "main.cpp"]
+    run: ["./main"]
+    compile_timeout_s: 15
+    time_limit_s: 3
+    memory_mb: 256
+    pids: 64
+    template: |
+      // CodeCage · C++17
+      // Reads integers from stdin and prints their sum and maximum.
+      #include <bits/stdc++.h>
+      using namespace std;
+
+      int main() {
+          vector<long long> nums;
+          long long x;
+          while (cin >> x) nums.push_back(x);
+          if (nums.empty()) { cout << "No numbers given.\n"; return 0; }
+          long long sum = accumulate(nums.begin(), nums.end(), 0LL);
+          cout << "count = " << nums.size() << "\n";
+          cout << "sum   = " << sum << "\n";
+          cout << "max   = " << *max_element(nums.begin(), nums.end()) << "\n";
+          return 0;
+      }
+    sample_stdin: "4 8 15 16 23 42"
+
+  java:
+    name: Java
+    version: "21"
+    image: localhost:5050/codecage/runtime-java:1.0
+    file: Main.java
+    monaco: java
+    compile: ["javac", "-J-Xmx256m", "-J-XX:+UseSerialGC", "-J-XX:TieredStopAtLevel=1", "-J-XX:-UsePerfData", "-encoding", "UTF-8", "-d", ".", "Main.java"]
+    run: ["java", "-Xmx256m", "-Xss8m", "-XX:+UseSerialGC", "-XX:TieredStopAtLevel=1", "-XX:-UsePerfData", "-Dfile.encoding=UTF-8", "-cp", ".", "Main"]
+    compile_timeout_s: 20
+    time_limit_s: 6
+    memory_mb: 384
+    pids: 128
+    template: |
+      // CodeCage · Java 21
+      // The public class must be called Main.
+      import java.util.*;
+
+      public class Main {
+          public static void main(String[] args) {
+              Scanner in = new Scanner(System.in);
+              int n = in.hasNextInt() ? in.nextInt() : 10;
+              long a = 0, b = 1;
+              StringBuilder sb = new StringBuilder();
+              for (int i = 0; i < n; i++) {
+                  sb.append(a).append(i + 1 < n ? ", " : "\n");
+                  long t = a + b; a = b; b = t;
+              }
+              System.out.print("First " + n + " Fibonacci numbers:\n" + sb);
+          }
+      }
+    sample_stdin: "15"

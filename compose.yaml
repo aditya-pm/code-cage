@@ -1,0 +1,80 @@
+# CodeCage platform: one compose file, four containers, one network, two volumes.
+#
+#   web (nginx) ──► api (FastAPI) ──► db (Postgres)          all on codecage-net
+#                    │
+#                    └─► rootless Podman socket ──► sandboxes (network=none, never on codecage-net)
+#
+# Start with ./codecage up, which discovers the rootless socket and sets
+# CODECAGE_PODMAN_SOCK before calling `podman compose`.
+name: codecage
+
+services:
+  db:
+    image: docker.io/library/postgres:16-alpine
+    container_name: codecage-db
+    environment:
+      POSTGRES_USER: codecage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-codecage}
+      POSTGRES_DB: codecage
+    volumes:
+      - codecage-pgdata:/var/lib/postgresql/data      # FR-6 persistent history
+    networks: [codecage-net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "codecage"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  registry:
+    image: docker.io/library/registry:2
+    container_name: codecage-registry
+    ports:
+      - "5050:5000"                                     # local image registry (FR-5); 5000 is AirPlay on macOS
+    volumes:
+      - codecage-registry:/var/lib/registry
+    networks: [codecage-net]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Containerfile
+    image: localhost/codecage/api:1.0
+    container_name: codecage-api
+    environment:
+      DATABASE_URL: postgresql://codecage:${POSTGRES_PASSWORD:-codecage}@db:5432/codecage
+      PODMAN_URL: unix:///run/podman/podman.sock
+      MAX_CONCURRENT: ${MAX_CONCURRENT:-4}
+      MAX_QUEUE: ${MAX_QUEUE:-16}
+    volumes:
+      # The user's ROOTLESS podman socket: sandboxes are created without root.
+      - ${CODECAGE_PODMAN_SOCK}:/run/podman/podman.sock
+    security_opt:
+      - label=disable          # allow socket access under SELinux (api container only)
+    depends_on: [db]
+    networks: [codecage-net]
+    restart: unless-stopped
+
+  web:
+    build:
+      context: web
+      dockerfile: Containerfile
+    image: localhost/codecage/web:1.0
+    container_name: codecage-web
+    ports:
+      - "${CODECAGE_PORT:-8080}:8080"
+    depends_on: [api]
+    networks: [codecage-net]
+    restart: unless-stopped
+
+networks:
+  codecage-net:
+    name: codecage-net
+    driver: bridge
+
+volumes:
+  codecage-pgdata:
+    name: codecage-pgdata
+  codecage-registry:
+    name: codecage-registry

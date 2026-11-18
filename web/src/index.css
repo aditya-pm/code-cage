@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html, body, #root { height: 100%; }
+body {
+  @apply bg-ink-950 text-slate-200 font-sans antialiased;
+  background-image:
+    radial-gradient(1200px 600px at 10% -10%, rgba(20, 199, 165, 0.08), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgba(99, 102, 241, 0.06), transparent 60%);
+  background-attachment: fixed;
+}
+.panel { @apply rounded-2xl border border-ink-700/80 bg-ink-900/80 backdrop-blur-sm; }
+.panel-head { @apply flex items-center justify-between gap-3 border-b border-ink-700/80 px-4 py-2.5; }
+.label { @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500; }
+.btn { @apply inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50; }
+.btn-primary { @apply btn bg-cage-500 text-ink-950 hover:bg-cage-400 shadow-glow; }
+.btn-ghost { @apply btn border border-ink-600 bg-ink-800/60 text-slate-300 hover:border-ink-500 hover:bg-ink-700/60; }
+.btn-danger { @apply btn bg-red-500 text-white hover:bg-red-400 shadow-danger; }
+.chip { @apply inline-flex items-center gap-1.5 rounded-lg border border-ink-600/80 bg-ink-800/70 px-2 py-1 text-[11px] text-slate-300 whitespace-nowrap; }
+.mono { @apply font-mono; }
+.cage-bars {
+  background-image: repeating-linear-gradient(90deg, rgba(63,224,192,.06) 0 1px, transparent 1px 22px);
+}
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #243042; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }

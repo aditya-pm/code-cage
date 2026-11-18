@@ -1,0 +1,27 @@
+# CodeCage runtime: C++17 (GCC on musl)
+# Build context: runtimes/
+
+FROM docker.io/library/golang:1.23-alpine AS runner
+WORKDIR /src
+COPY runner/ .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /cage-runner .
+
+FROM docker.io/library/alpine:3.20
+LABEL org.codecage.runtime="cpp" \
+      org.codecage.description="Hardened C++ sandbox runtime (g++ only, no shell, no apk)"
+
+COPY --from=runner /cage-runner /usr/local/bin/cage-runner
+
+RUN apk add --no-cache g++ musl-dev \
+ && addgroup -g 10001 sandbox && adduser -D -H -u 10001 -G sandbox -s /sbin/nologin sandbox \
+ && rm -rf /usr/share/man /usr/share/doc /usr/share/info /usr/libexec/gcc/*/*/lto* \
+ && find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
+ && mkdir -p /sandbox && chmod 1777 /sandbox \
+ && rm -rf /sbin/apk /etc/apk /lib/apk /usr/share/apk /var/cache/apk /root /home \
+ && /bin/busybox find / -xdev -type l | while read -r l; do \
+      case "$(/bin/busybox readlink "$l")" in *busybox) /bin/busybox rm -f "$l";; esac; done \
+ && /bin/busybox rm -f /bin/busybox
+
+USER 10001:10001
+WORKDIR /sandbox
+ENTRYPOINT ["/usr/local/bin/cage-runner"]

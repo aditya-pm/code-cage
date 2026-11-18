@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# CodeCage control script. Run ./codecage help for usage.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+REGISTRY="localhost:5050"
+RUNTIMES=(python cpp java)
+VERSION="1.0"
+PORT="${CODECAGE_PORT:-8080}"
+[[ -f .env ]] && set -a && . ./.env && set +a && PORT="${CODECAGE_PORT:-8080}"
+
+c_reset=$'\033[0m'; c_dim=$'\033[2m'; c_bold=$'\033[1m'
+c_green=$'\033[32m'; c_red=$'\033[31m'; c_yellow=$'\033[33m'; c_cyan=$'\033[36m'
+
+banner() {
+  printf '%s' "$c_cyan"
+  cat <<'EOF'
+   ____          _       ____
+  / ___|___   __| | ___ / ___|__ _  __ _  ___
+ | |   / _ \ / _` |/ _ \ |   / _` |/ _` |/ _ \
+ | |__| (_) | (_| |  __/ |__| (_| | (_| |  __/
+  \____\___/ \__,_|\___|\____\__,_|\__, |\___|
+                                   |___/
+EOF
+  printf '%s  secure sandboxed code execution on rootless podman%s\n\n' "$c_dim" "$c_reset"
+}
+
+step() { printf '%s==>%s %s%s%s\n' "$c_cyan" "$c_reset" "$c_bold" "$*" "$c_reset"; }
+ok()   { printf '  %s✔%s %s\n' "$c_green" "$c_reset" "$*"; }
+warn() { printf '  %s!%s %s\n' "$c_yellow" "$c_reset" "$*"; }
+die()  { printf '  %s✘ %s%s\n' "$c_red" "$*" "$c_reset" >&2; exit 1; }
+
+export PODMAN_COMPOSE_WARNING_LOGS=false
+compose() { podman compose "$@"; }
+
+socket_path() {
+  local p
+  p="$(podman info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)"
+  p="${p#unix://}"
+  [[ -n "$p" ]] || die "could not determine the podman socket path (is podman running?)"
+  echo "$p"
+}
+
+export_socket() {
+  CODECAGE_PODMAN_SOCK="$(socket_path)"
+  export CODECAGE_PODMAN_SOCK
+}
+
+cmd_doctor() {
+  step "Checking host prerequisites"
+  command -v podman >/dev/null || die "podman is not installed (see docs/SETUP.md)"
+  ok "podman $(podman --version | awk '{print $3}') client"
+  if [[ "$(uname)" == "Darwin" ]]; then
+    podman machine inspect --format '{{.State}}' 2>/dev/null | grep -q running \
+      || die "podman machine is not running: run 'podman machine start'"
+    ok "podman machine is running (Linux VM)"
+  else
+    if ! podman info >/dev/null 2>&1; then die "podman info failed"; fi
+    systemctl --user is-active --quiet podman.socket 2>/dev/null \
+      || { warn "enabling the rootless podman socket for this user"; systemctl --user enable --now podman.socket; }
+    ok "rootless podman.socket active"
+  fi
+  local rootless; rootless="$(podman info --format '{{.Host.Security.Rootless}}')"
+  [[ "$rootless" == "true" ]] && ok "SR-1 rootless mode: true" \
+    || die "podman is running ROOTFUL. CodeCage requires rootless (podman machine set --rootful=false)"
+  local cg; cg="$(podman info --format '{{.Host.CgroupsVersion}}')"
+  [[ "$cg" == "v2" ]] && ok "cgroups $cg" || warn "cgroups $cg: v2 is required for rootless resource limits"
+  local ctrls; ctrls="$(podman info --format '{{range .Host.CgroupControllers}}{{.}} {{end}}')"
+  for c in cpu memory pids; do
+    [[ " $ctrls " == *" $c "* ]] && ok "cgroup controller '$c' delegated" \
+      || warn "cgroup controller '$c' NOT delegated: the matching limit cannot be enforced"
+  done
+  ok "podman socket: $(socket_path)"
+  podman compose version >/dev/null 2>&1 && ok "compose provider available" \
+    || die "no compose provider: install podman-compose (brew install podman-compose / dnf install podman-compose)"
+}
+
+cmd_build() {
+  export_socket
+  step "Starting the local image registry ($REGISTRY)"
+  compose up -d registry >/dev/null
+  for _ in {1..30}; do curl -sf "http://$REGISTRY/v2/" >/dev/null 2>&1 && break; sleep 1; done
+  for rt in "${RUNTIMES[@]}"; do
+    local tag="$REGISTRY/codecage/runtime-$rt:$VERSION"
+    step "Building runtime image: $rt"
+    podman build --layers -t "$tag" -f "runtimes/$rt/Containerfile" runtimes/
+    step "Pushing $tag"
+    podman push --tls-verify=false "$tag" >/dev/null && ok "pushed to $REGISTRY"
+  done
+  step "Building platform images (api, web)"
+  compose build
+  cmd_images
+}
+
+cmd_images() {
+  step "Runtime images"
+  podman images --filter "reference=$REGISTRY/codecage/*" --format '  {{.Repository}}:{{.Tag}}\t{{.Size}}'
+  step "Registry catalogue"
+  podman exec codecage-registry wget -qO- http://localhost:5000/v2/_catalog 2>/dev/null | sed 's/^/  /' || true
+  echo
+}
+
+wait_healthy() {
+  step "Waiting for the platform to become healthy"
+  for _ in {1..60}; do
+    if curl -sf "http://localhost:$PORT/api/health" >/tmp/codecage-health.json 2>/dev/null; then
+      ok "API healthy: $(python3 - <<'PY' 2>/dev/null || echo ok
+import json
+d = json.load(open("/tmp/codecage-health.json"))["podman"]
+print("podman %s, rootless=%s, %s %s, seccomp=%s, selinux=%s" % (d.get("version"), d.get("rootless"),
+      d.get("os", ""), d.get("os_version", ""), d.get("seccomp"), d.get("selinux")))
+PY
+)"
+      return 0
+    fi
+    sleep 1
+  done
+  die "platform did not become healthy; check './codecage logs'"
+}
+
+cmd_up() {
+  banner
+  cmd_doctor
+  export_socket
+  local missing=0
+  for rt in "${RUNTIMES[@]}"; do
+    podman image exists "$REGISTRY/codecage/runtime-$rt:$VERSION" || missing=1
+  done
+  if [[ $missing == 1 ]] || ! podman image exists localhost/codecage/api:1.0 || ! podman image exists localhost/codecage/web:1.0; then
+    warn "images missing: building them first"
+    cmd_build
+  fi
+  step "Starting CodeCage (web, api, db, registry)"
+  compose up -d
+  wait_healthy
+  printf '\n  %s%sCodeCage is live → http://localhost:%s%s\n\n' "$c_bold" "$c_green" "$PORT" "$c_reset"
+}
+
+cmd_down() {
+  export_socket
+  step "Stopping CodeCage (volumes and history are kept)"
+  compose down
+  ok "stopped"
+}
+
+cmd_restart() { cmd_down; cmd_up; }
+
+cmd_rebuild() {
+  cmd_build
+  step "Recreating platform containers with the new images"
+  compose up -d --force-recreate
+  wait_healthy
+}
+
+cmd_status() {
+  export_socket
+  step "Platform containers"
+  podman ps --filter "name=codecage-" --format '  {{.Names}}\t{{.Status}}\t{{.Ports}}'
+  step "Execution sandboxes (should be empty when idle)"
+  local n; n="$(podman ps -a --filter label=codecage.sandbox=1 -q | wc -l | tr -d ' ')"
+  if [[ "$n" == "0" ]]; then ok "0 sandbox containers, nothing left behind"
+  else podman ps -a --filter label=codecage.sandbox=1 --format '  {{.Names}}\t{{.Status}}'; fi
+  step "Network & storage"
+  podman network inspect codecage-net --format '  network {{.Name}} ({{.Driver}}) subnet {{range .Subnets}}{{.Subnet}}{{end}}' 2>/dev/null || true
+  podman volume ls --filter name=codecage --format '  volume {{.Name}}'
+}
+
+cmd_logs() { export_socket; compose logs -f "${1:-api}"; }
+
+cmd_clean() {
+  step "Removing any leftover sandbox containers"
+  podman ps -a --filter label=codecage.sandbox=1 -q | xargs -r podman rm -f
+  ok "clean"
+}
+
+cmd_suite() {
+  step "Running the security test suite against http://localhost:$PORT"
+  python3 tests/security/run_suite.py --url "http://localhost:$PORT" "$@"
+}
+
+cmd_reset() {
+  read -r -p "This deletes ALL submission history and the registry. Type 'yes': " ans
+  [[ "$ans" == "yes" ]] || exit 1
+  export_socket
+  compose down -v
+  ok "platform and volumes removed"
+}
+
+cmd_help() {
+  banner
+  cat <<EOF
+Usage: ./codecage <command>
+
+  up        Check host, build images if needed, start the platform (single command)
+  down      Stop the platform (history volume is kept)
+  restart   down + up (demonstrates persistent history)
+  build     Build + push runtime images to the local registry, build api/web
+  rebuild   build + recreate the running containers (after code changes)
+  images    Show runtime images, sizes and the registry catalogue
+  status    Platform containers, leftover sandboxes, network and volumes
+  logs [s]  Follow logs of a service (default: api)
+  suite     Run the 10-case security test suite and write reports/
+  clean     Force-remove any leftover sandbox containers
+  doctor    Verify rootless podman, cgroup v2 controllers and compose
+  reset     Remove the platform AND its volumes (asks first)
+EOF
+}
+
+case "${1:-help}" in
+  up|down|restart|rebuild|build|images|status|suite|clean|doctor|reset|help) c="$1"; shift || true; "cmd_$c" "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  *) cmd_help; exit 1 ;;
+esac
